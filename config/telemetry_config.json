@@ -1,0 +1,8 @@
+{
+  "ws_url": "wss://telemetry.nettra.tech/api/ws",
+  "headers_json": "config/headers.json",
+  "asset_types": {
+    "estanques": "La Aurora - Estanques",
+    "bombas": "La Aurora - Bombas"
+  }
+}

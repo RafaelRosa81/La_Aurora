@@ -33,3 +33,7 @@ PYTHONPATH=src ./scripts/export_telemetry.py
 ```
 
 Los archivos CSV se guardarán en el directorio indicado por `OUTPUT_DIR`.
+
+Uso principal: export_monthly_rest.py
+
+Uso principal: export_monthly_rest.py

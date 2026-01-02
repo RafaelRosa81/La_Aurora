@@ -1,5 +1,19 @@
-output/
+# --- Secrets ---
 .env
-*.log
+*.env
+config/auth_token.txt
+config/headers*.txt
+config/headers*.json
+
+# --- Output data ---
+output/
+
+# --- Python ---
 __pycache__/
+*.pyc
 .venv/
+.env/
+
+# --- OS/IDE ---
+.vscode/
+.DS_Store

@@ -7,12 +7,15 @@ config/headers*.json
 
 # --- Output data ---
 output/
+reports/
 
 # --- Python ---
 __pycache__/
 *.pyc
 .venv/
 .env/
+*.patch
+*.diff
 
 # --- OS/IDE ---
 .vscode/

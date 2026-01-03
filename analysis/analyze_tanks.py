@@ -5,6 +5,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from openpyxl.chart import BarChart, Reference, ScatterChart, Series
+from openpyxl.utils import get_column_letter
+
 
 TIMESTAMP_CANDIDATES = ["timestamp", "ts", "datetime", "fechahora"]
 LEVEL_COLUMNS = {
@@ -263,8 +265,8 @@ def add_summary_chart(ws, summary_df: pd.DataFrame) -> None:
     chart.set_categories(categories)
     chart.height = 8
     chart.width = 16
-    ws.add_chart(chart, f"{chr(missing_col + 2)}2")
-
+    #ws.add_chart(chart, f"{chr(missing_col + 2)}2")
+    ws.add_chart(chart, f"{get_column_letter(missing_col + 2)}2")
 
 def add_recharge_chart(ws, start_row: int, bins_count: int) -> None:
     if bins_count <= 0:

@@ -33,6 +33,19 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def parse_timestamp(series: pd.Series) -> tuple[pd.Series, str]:
+    numeric = pd.to_numeric(series, errors="coerce")
+    if numeric.notna().any():
+        median_value = float(numeric.dropna().median())
+        if median_value >= 1e14:
+            return pd.to_datetime(numeric, errors="coerce", unit="us"), "epoch_us"
+        if median_value >= 1e11:
+            return pd.to_datetime(numeric, errors="coerce", unit="ms"), "epoch_ms"
+        if median_value >= 1e8:
+            return pd.to_datetime(numeric, errors="coerce", unit="s"), "epoch_s"
+    return pd.to_datetime(series, errors="coerce"), "string"
+
+
 def parse_date(date_text: str, is_end: bool, freq_minutes: int) -> pd.Timestamp | None:
     if not date_text:
         return None
@@ -65,19 +78,19 @@ def determine_asset_series(df: pd.DataFrame, file_path: Path) -> pd.Series:
     return pd.Series([fallback] * len(df), index=df.index)
 
 
-def load_csv(file_path: Path, freq_minutes: int) -> pd.DataFrame | None:
+def load_csv(file_path: Path, freq_minutes: int) -> tuple[pd.DataFrame | None, str | None]:
     try:
         df = pd.read_csv(file_path)
     except Exception as exc:
         print(f"[warning] No se pudo leer {file_path}: {exc}")
-        return None
+        return None, None
 
     timestamp_col = find_timestamp_column(df)
     if not timestamp_col:
         print(f"[warning] Sin columna timestamp en {file_path}")
-        return None
+        return None, None
 
-    df["timestamp"] = pd.to_datetime(df[timestamp_col], errors="coerce")
+    df["timestamp"], strategy = parse_timestamp(df[timestamp_col])
     invalid_count = int(df["timestamp"].isna().sum())
     if invalid_count:
         print(
@@ -85,10 +98,10 @@ def load_csv(file_path: Path, freq_minutes: int) -> pd.DataFrame | None:
         )
     df = df[df["timestamp"].notna()].copy()
     if df.empty:
-        return None
+        return None, strategy
 
     df["asset_id"] = determine_asset_series(df, file_path)
-    return df[["asset_id", "timestamp"]]
+    return df[["asset_id", "timestamp"]], strategy
 
 
 def expected_count(
@@ -185,6 +198,7 @@ def build_report(
     freq_minutes: int,
     output_path: Path,
     input_dir: Path,
+    timestamp_parse_strategy: str,
 ) -> None:
     summary_rows = []
     gaps_rows = []
@@ -297,6 +311,7 @@ def build_report(
             ("end_date", end_date),
             ("freq_minutes", freq_minutes),
             ("output", str(output_path)),
+            ("timestamp_parse_strategy", timestamp_parse_strategy),
             ("version", VERSION),
             ("generated_at", datetime.now()),
         ]
@@ -396,11 +411,14 @@ def main() -> None:
         print(f"[warning] No se encontraron CSVs en {input_dir}")
 
     combined_frames = []
+    strategies = []
     for csv_file in csv_files:
-        df = load_csv(csv_file, freq_minutes)
+        df, strategy = load_csv(csv_file, freq_minutes)
         if df is None or df.empty:
             continue
         combined_frames.append(df)
+        if strategy:
+            strategies.append(strategy)
 
     if combined_frames:
         combined = pd.concat(combined_frames, ignore_index=True)
@@ -413,6 +431,13 @@ def main() -> None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_path = Path("reports") / f"integrity_{args.group}_{timestamp}.xlsx"
 
+    if not strategies:
+        timestamp_parse_strategy = "unknown"
+    elif len(set(strategies)) == 1:
+        timestamp_parse_strategy = strategies[0]
+    else:
+        timestamp_parse_strategy = "mixed"
+
     build_report(
         combined=combined,
         group=args.group,
@@ -422,6 +447,7 @@ def main() -> None:
         freq_minutes=freq_minutes,
         output_path=output_path,
         input_dir=input_dir,
+        timestamp_parse_strategy=timestamp_parse_strategy,
     )
 
 

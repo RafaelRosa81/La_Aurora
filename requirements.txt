@@ -1,4 +1,6 @@
 websocket-client
 pandas
+numpy
+openpyxl
 python-dateutil
 python-dotenv

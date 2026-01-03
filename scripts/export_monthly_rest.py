@@ -128,6 +128,13 @@ def write_csv(path, asset, y, m, payload):
             row.update(rows[ts])
             w.writerow(row)
 
+def file_exists_and_nonempty(path: str) -> bool:
+    """True si el archivo existe y tiene contenido."""
+    try:
+        return os.path.isfile(path) and os.path.getsize(path) > 0
+    except OSError:
+        return False
+
 
 def parse_only_list(s: str | None):
     if not s:
@@ -162,6 +169,16 @@ def parse_args():
         "--only",
         default=None,
         help='Lista separada por comas de assets a exportar (match por label o name). Ej: "3A - 3B,Principal"',
+    )
+    p.add_argument(
+        "--resume",
+        action="store_true",
+        help="Salta meses ya descargados (CSV existente y no vacío).",
+    )
+    p.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Reescribe archivos existentes (ignora --resume).",
     )
     return p.parse_args()
 
@@ -201,10 +218,33 @@ def main():
             asset_id = asset["id"]["id"]
             label = asset.get("label") or asset.get("name") or asset_id
             safe_label = sanitize(label)
-
+            '''
             for y, m, start_dt, end_dt in month_ranges(args.start_ym, args.end_ym, tz_local):
                 payload = fetch_timeseries(base, headers, asset_id, keys, ms(start_dt), ms(end_dt))
                 out = os.path.join(args.outdir, group, safe_label, f"{safe_label}_{y:04d}-{m:02d}.csv")
+                write_csv(out, asset, y, m, payload)
+                print("OK", out)
+            '''
+            for y, m, start_dt, end_dt in month_ranges(args.start_ym, args.end_ym, tz_local):
+                out = os.path.join(
+                    args.outdir,
+                    group,
+                    safe_label,
+                    f"{safe_label}_{y:04d}-{m:02d}.csv",
+                )
+
+                if args.resume and (not args.overwrite) and file_exists_and_nonempty(out):
+                    print("SKIP", out)
+                    continue
+
+                payload = fetch_timeseries(
+                    base,
+                    headers,
+                    asset_id,
+                    keys,
+                    ms(start_dt),
+                    ms(end_dt),
+                )
                 write_csv(out, asset, y, m, payload)
                 print("OK", out)
 

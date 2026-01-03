@@ -1,0 +1,18 @@
+La_Aurora/
+│
+├─ scripts/
+│   └─ export_monthly_rest.py   ← SCRIPT OFICIAL (descarga datos)
+│
+├─ tools/dev/                   ← scripts exploratorios / debugging
+│   ├─ discover_assets*.py
+│   ├─ list_asset_types.py
+│   └─ test_ws.py
+│
+├─ config/
+│   ├─ example.env              ← ejemplo (sí se versiona)
+│   └─ telemetry_config.json    ← config NO sensible
+│
+├─ output/                      ← datos descargados (NO versionar)
+├─ .env                         ← credenciales (NO versionar)
+├─ .gitignore                   ← protege lo sensible
+└─ README.md                    ← documentación actual

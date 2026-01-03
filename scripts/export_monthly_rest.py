@@ -1,83 +1,94 @@
 # scripts/export_monthly_rest.py
+import argparse
 import os
 import csv
 import calendar
+import re
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo  # Python 3.9+
+
 import requests
 from dotenv import load_dotenv
 
-load_dotenv()
-
-BASE = os.environ["TB_BASE_URL"].rstrip("/")
-TOKEN = os.environ["TB_TOKEN"].strip()
-TZ = os.environ.get("TB_TIMEZONE", "America/Montevideo")
-
-HEADERS = {"X-Authorization": f"Bearer {TOKEN}"}
 
 ASSET_TYPES = {
     "estanques": "La Aurora - Estanques",
     "bombas": "La Aurora - Bombas",
 }
 
-# Ajustá estas keys a tus series reales (las vemos rápido en la UI o con un endpoint)
 KEYS = {
-    "estanques": ["nivelPorcentual", "nivelEstanque"],      # ejemplo
-    "bombas":    ["estadoOn", "timeOn"],   # ejemplo
+    "estanques": ["nivelPorcentual", "nivelEstanque"],
+    "bombas": ["estadoOn", "timeOn"],
 }
 
-OUTDIR = "output/monthly"
+
+def sanitize(s: str) -> str:
+    """Seguro para Windows."""
+    s = (s or "").strip()
+    s = re.sub(r'[<>:"/\\|?*\x00-\x1F]+', "_", s)
+    s = re.sub(r"\s+", " ", s)
+    return s
+
 
 def ms(dt: datetime) -> int:
-    return int(dt.replace(tzinfo=timezone.utc).timestamp() * 1000)
+    """
+    Convierte datetime timezone-aware a epoch ms (UTC).
+    Importante: dt DEBE tener tzinfo.
+    """
+    if dt.tzinfo is None:
+        raise ValueError("ms() requiere datetime con tzinfo (timezone-aware).")
+    return int(dt.astimezone(timezone.utc).timestamp() * 1000)
 
-def month_ranges(start_ym: str, end_ym: str):
-    # start_ym / end_ym formato "YYYY-MM"
+
+def month_ranges(start_ym: str, end_ym: str, tz_local: ZoneInfo):
+    """
+    Rangos mensuales definidos en tz_local (ej. America/Santiago).
+    Retorna datetimes timezone-aware en tz_local.
+    """
     sy, sm = map(int, start_ym.split("-"))
     ey, em = map(int, end_ym.split("-"))
     y, m = sy, sm
     while (y < ey) or (y == ey and m <= em):
         last_day = calendar.monthrange(y, m)[1]
-        start = datetime(y, m, 1, 0, 0, 0)
-        end = datetime(y, m, last_day, 23, 59, 59)
+
+        # 00:00:00 del primer día EN HORA LOCAL
+        start = datetime(y, m, 1, 0, 0, 0, tzinfo=tz_local)
+
+        # 23:59:59 del último día EN HORA LOCAL
+        end = datetime(y, m, last_day, 23, 59, 59, tzinfo=tz_local)
+
         yield y, m, start, end
+
         m += 1
         if m == 13:
             m = 1
             y += 1
 
-def list_assets(asset_type: str, page_size=100):
-    # 1) obtener customerId
-    me = requests.get(f"{BASE}/api/auth/user", headers=HEADERS, timeout=30)
-    me.raise_for_status()
-    customer_id = me.json()["customerId"]["id"]
 
+def get_customer_id(base: str, headers: dict) -> str:
+    me = requests.get(f"{base}/api/auth/user", headers=headers, timeout=30)
+    me.raise_for_status()
+    return me.json()["customerId"]["id"]
+
+
+def list_assets(base: str, headers: dict, customer_id: str, asset_type: str, page_size=100):
     assets = []
     page = 0
-
     while True:
-        url = f"{BASE}/api/customer/{customer_id}/assets"
-        params = {
-            "pageSize": page_size,
-            "page": page,
-            "type": asset_type,
-        }
-
-        r = requests.get(url, headers=HEADERS, params=params, timeout=60)
+        url = f"{base}/api/customer/{customer_id}/assets"
+        params = {"pageSize": page_size, "page": page, "type": asset_type}
+        r = requests.get(url, headers=headers, params=params, timeout=60)
         r.raise_for_status()
         data = r.json()
-
         assets.extend(data.get("data", []))
-
         if not data.get("hasNext"):
             break
-
         page += 1
-
     return assets
 
 
-def fetch_timeseries(asset_id: str, keys: list[str], start_ts: int, end_ts: int):
-    url = f"{BASE}/api/plugins/telemetry/ASSET/{asset_id}/values/timeseries"
+def fetch_timeseries(base: str, headers: dict, asset_id: str, keys: list[str], start_ts: int, end_ts: int):
+    url = f"{base}/api/plugins/telemetry/ASSET/{asset_id}/values/timeseries"
     params = {
         "keys": ",".join(keys),
         "startTs": start_ts,
@@ -85,15 +96,15 @@ def fetch_timeseries(asset_id: str, keys: list[str], start_ts: int, end_ts: int)
         "agg": "NONE",
         "limit": 50000,
     }
-    r = requests.get(url, headers=HEADERS, params=params, timeout=120)
+    r = requests.get(url, headers=headers, params=params, timeout=120)
     r.raise_for_status()
     return r.json()
+
 
 def write_csv(path, asset, y, m, payload):
     os.makedirs(os.path.dirname(path), exist_ok=True)
 
-    # Normalizamos: una fila por timestamp, columnas por key
-    # payload: { key: [ {ts:..., value:...}, ...], ... }
+    # Normalizamos: una fila por timestamp (ts en ms UTC), columnas por key
     rows = {}
     for k, series in payload.items():
         for p in series:
@@ -117,28 +128,86 @@ def write_csv(path, asset, y, m, payload):
             row.update(rows[ts])
             w.writerow(row)
 
+
+def parse_only_list(s: str | None):
+    if not s:
+        return None
+    parts = [p.strip() for p in s.split(",")]
+    return {p for p in parts if p}
+
+
+def asset_matches(asset: dict, only_set: set[str] | None) -> bool:
+    if not only_set:
+        return True
+    name = (asset.get("name") or "").strip()
+    label = (asset.get("label") or "").strip()
+    return (name in only_set) or (label in only_set)
+
+
+def parse_args():
+    p = argparse.ArgumentParser(
+        description="Export mensual a CSV (REST) para estanques y bombas (rangos definidos en zona horaria local).",
+    )
+    p.add_argument("--start-ym", required=True, help="Inicio YYYY-MM (ej: 2024-01)")
+    p.add_argument("--end-ym", required=True, help="Fin YYYY-MM (ej: 2025-12)")
+    p.add_argument("--outdir", default="output/monthly", help="Directorio de salida")
+    p.add_argument(
+        "--groups",
+        nargs="+",
+        choices=list(ASSET_TYPES.keys()),
+        default=list(ASSET_TYPES.keys()),
+        help="Qué exportar",
+    )
+    p.add_argument(
+        "--only",
+        default=None,
+        help='Lista separada por comas de assets a exportar (match por label o name). Ej: "3A - 3B,Principal"',
+    )
+    return p.parse_args()
+
+
 def main():
+    # CLI/help NO toca red: solo parsea args y sale si corresponde
+    args = parse_args()
 
-    print("Estanques:", len(list_assets("La Aurora - Estanques")))
-    print("Bombas:", len(list_assets("La Aurora - Bombas")))
-    #return
+    # Cargar .env y variables
+    load_dotenv()
 
-    start_ym = "2024-01"
-    end_ym   = "2025-12"
+    base = os.environ["TB_BASE_URL"].rstrip("/")
+    token = os.environ["TB_TOKEN"].strip()
+    headers = {"X-Authorization": f"Bearer {token}"}
 
-    for group, a_type in ASSET_TYPES.items():
-        assets = list_assets(a_type)
+    # Zona horaria local para definir los rangos (Chile por defecto)
+    tz_name = os.environ.get("TB_TIMEZONE", "America/Santiago")
+    tz_local = ZoneInfo(tz_name)
+    print(f"Using timezone: {tz_name}")
+
+    only_set = parse_only_list(args.only)
+
+    # customerId 1 vez
+    customer_id = get_customer_id(base, headers)
+
+    for group in args.groups:
+        a_type = ASSET_TYPES[group]
+        keys = KEYS[group]
+
+        assets = list_assets(base, headers, customer_id, a_type)
         print(f"{group}: {len(assets)} assets")
 
         for asset in assets:
+            if not asset_matches(asset, only_set):
+                continue
+
             asset_id = asset["id"]["id"]
             label = asset.get("label") or asset.get("name") or asset_id
+            safe_label = sanitize(label)
 
-            for y, m, start_dt, end_dt in month_ranges(start_ym, end_ym):
-                payload = fetch_timeseries(asset_id, KEYS[group], ms(start_dt), ms(end_dt))
-                out = os.path.join(OUTDIR, group, f"{label}", f"{label}_{y:04d}-{m:02d}.csv")
+            for y, m, start_dt, end_dt in month_ranges(args.start_ym, args.end_ym, tz_local):
+                payload = fetch_timeseries(base, headers, asset_id, keys, ms(start_dt), ms(end_dt))
+                out = os.path.join(args.outdir, group, safe_label, f"{safe_label}_{y:04d}-{m:02d}.csv")
                 write_csv(out, asset, y, m, payload)
                 print("OK", out)
+
 
 if __name__ == "__main__":
     main()

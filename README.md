@@ -24,6 +24,10 @@ cp config/example.env .env
 
 2. Edita `.env` con los valores de tu entorno (sin compartir credenciales).
 
+3. El parámetro TB_TIMEZONE debe coincidir con el timeZoneId
+utilizado por el dashboard (ver DevTools → Network → WS → Messages).
+No necesariamente coincide con la ubicación física de los sensores.
+
 ## Uso
 
 Ejecuta el exportador usando el módulo dentro de `src/`:

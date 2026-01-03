@@ -1,0 +1,37 @@
+{
+  "assets_included": [
+    "ASSET_001"
+  ],
+  "date_range": {
+    "min": "1970-01-01T00:28:50.430000",
+    "max": "1970-01-01T00:28:50.459940"
+  },
+  "columns": [
+    "asset_id",
+    "asset_name",
+    "asset_label",
+    "year",
+    "month",
+    "ts",
+    "nivelEstanque",
+    "nivelPorcentual"
+  ],
+  "rows_per_asset": {
+    "ASSET_001": 500
+  },
+  "parameters": {
+    "input": "output\\datos_def\\estanques\\Principal\\Principal_2024-11.csv",
+    "out_dir": "data_samples\\estanques",
+    "group": "estanques",
+    "assets": 2,
+    "asset_labels": null,
+    "max_rows": 500,
+    "round": 2,
+    "seed": 42,
+    "asset_mapping": {
+      "Principal": "ASSET_001"
+    },
+    "asset_column_detected": "asset_label",
+    "timestamp_column_detected": "ts"
+  }
+}

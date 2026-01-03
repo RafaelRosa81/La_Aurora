@@ -1,0 +1,37 @@
+{
+  "assets_included": [
+    "ASSET_001"
+  ],
+  "date_range": {
+    "min": "1970-01-01T00:29:24.558000",
+    "max": "1970-01-01T00:29:24.588120"
+  },
+  "columns": [
+    "asset_id",
+    "asset_name",
+    "asset_label",
+    "year",
+    "month",
+    "ts",
+    "estadoOn",
+    "timeOn"
+  ],
+  "rows_per_asset": {
+    "ASSET_001": 500
+  },
+  "parameters": {
+    "input": "output\\datos_def\\bombas\\Chilcas_1\\Chilcas_1_2025-12.csv",
+    "out_dir": "data_samples\\bombas",
+    "group": "bombas",
+    "assets": 2,
+    "asset_labels": null,
+    "max_rows": 500,
+    "round": 2,
+    "seed": 42,
+    "asset_mapping": {
+      "Chilcas 1": "ASSET_001"
+    },
+    "asset_column_detected": "asset_label",
+    "timestamp_column_detected": "ts"
+  }
+}

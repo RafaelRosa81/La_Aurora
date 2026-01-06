@@ -1,6 +1,9 @@
+#Funciona en ambiente la_aurora
+
 import argparse
 from datetime import datetime
 from pathlib import Path
+import re
 
 import numpy as np
 import pandas as pd
@@ -30,10 +33,22 @@ def parse_args() -> argparse.Namespace:
         default=False,
         help="Procesa todos los assets detectados (default)",
     )
+    parser.add_argument(
+        "--per-asset",
+        action="store_true",
+        default=False,
+        help="Genera un Excel por asset en reports/",
+    )
     parser.add_argument("--start-date", help="Fecha de inicio (YYYY-MM-DD)")
     parser.add_argument("--end-date", help="Fecha de fin (YYYY-MM-DD)")
     parser.add_argument("--freq-minutes", type=int, default=1, help="Frecuencia esperada")
     parser.add_argument("--output", help="Ruta de salida para el Excel (default reports/...)")
+    parser.add_argument(
+        "--max-scatter-points",
+        type=int,
+        default=2000,
+        help="Máximo de puntos para scatter (0 para omitir)",
+    )
     return parser.parse_args()
 
 
@@ -227,7 +242,20 @@ def detect_recharge_events(asset_id: str, df: pd.DataFrame) -> list[dict]:
     return events
 
 
-def compute_correlation(asset_id: str, df: pd.DataFrame) -> tuple[dict, pd.DataFrame]:
+def downsample_pairs(pairs: pd.DataFrame, max_points: int) -> pd.DataFrame:
+    if max_points <= 0 or pairs.empty:
+        return pairs
+    total = pairs.shape[0]
+    if total <= max_points:
+        return pairs
+    indices = np.linspace(0, total - 1, num=max_points, dtype=int)
+    indices = np.unique(indices)
+    return pairs.iloc[indices]
+
+
+def compute_correlation(
+    asset_id: str, df: pd.DataFrame, max_scatter_points: int
+) -> tuple[dict, pd.DataFrame]:
     pairs = df[["nivelPorcentual", "nivelEstanque"]].dropna()
     if pairs.shape[0] < 2:
         return {}, pd.DataFrame(columns=["asset_id", "nivelPorcentual", "nivelEstanque"])
@@ -246,8 +274,11 @@ def compute_correlation(asset_id: str, df: pd.DataFrame) -> tuple[dict, pd.DataF
         "intercept": float(intercept),
         "r2": float(r2),
     }
-    scatter = pairs.copy()
-    scatter.insert(0, "asset_id", asset_id)
+    scatter = pd.DataFrame(columns=["asset_id", "nivelPorcentual", "nivelEstanque"])
+    if max_scatter_points > 0:
+        sampled = downsample_pairs(pairs, max_scatter_points)
+        scatter = sampled.copy()
+        scatter.insert(0, "asset_id", asset_id)
     return summary, scatter
 
 
@@ -300,6 +331,29 @@ def add_correlation_chart(ws, start_row: int, data_rows: int) -> None:
     ws.add_chart(chart, f"E{start_row}")
 
 
+def add_histogram_chart(
+    ws, asset_id: str, start_row: int, end_row: int, anchor: str
+) -> None:
+    if end_row < start_row:
+        return
+    chart = BarChart()
+    chart.title = f"Hist nivelPorcentual - {asset_id}"
+    bin_left_col = 2
+    count_col = 4
+    data = Reference(ws, min_col=count_col, min_row=start_row, max_row=end_row)
+    categories = Reference(ws, min_col=bin_left_col, min_row=start_row, max_row=end_row)
+    chart.add_data(data, titles_from_data=False)
+    chart.set_categories(categories)
+    chart.height = 8
+    chart.width = 16
+    ws.add_chart(chart, anchor)
+
+
+def normalize_asset_filename(asset_id: str) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9_-]+", "_", asset_id.strip())
+    return normalized.strip("_") or "asset"
+
+
 def build_report(
     combined: pd.DataFrame,
     asset_filter: str | None,
@@ -310,6 +364,7 @@ def build_report(
     input_dir: Path,
     timestamp_strategies: list[str],
     detected_columns: dict[str, list[str]],
+    max_scatter_points: int,
 ) -> None:
     summary_rows = []
     percentiles_rows = []
@@ -320,10 +375,6 @@ def build_report(
     missing_notes = []
 
     filtered = combined.copy()
-    if asset_filter:
-        filtered = filtered[
-            filtered["asset_id"].str.contains(asset_filter, case=False, na=False)
-        ]
 
     percentiles = [1, 5, 10, 25, 50, 75, 90, 95, 99]
 
@@ -369,7 +420,9 @@ def build_report(
         events_rows.extend(detect_recharge_events(asset_id, asset_df))
 
         if asset_df[["nivelPorcentual", "nivelEstanque"]].dropna().shape[0] >= 2:
-            corr_summary, scatter = compute_correlation(asset_id, asset_df)
+            corr_summary, scatter = compute_correlation(
+                asset_id, asset_df, max_scatter_points
+            )
             if corr_summary:
                 correlation_rows.append(corr_summary)
             if not scatter.empty:
@@ -395,6 +448,7 @@ def build_report(
         ["output", str(output_path)],
         ["MIN_AMPLITUDE_PCT", str(MIN_AMPLITUDE_PCT)],
         ["MIN_DURATION_MIN", str(MIN_DURATION_MIN)],
+        ["max_scatter_points", str(max_scatter_points)],
         ["timestamp_strategies", ", ".join(sorted(set(timestamp_strategies)))],
     ]
     for file_path, columns in detected_columns.items():
@@ -412,7 +466,7 @@ def build_report(
         events_df.to_excel(writer, sheet_name="RechargeEvents", index=False)
         correlation_df.to_excel(writer, sheet_name="Correlation", index=False)
         start_row = len(correlation_df) + 3
-        if not scatter_df.empty:
+        if max_scatter_points > 0 and not scatter_df.empty:
             scatter_df.to_excel(
                 writer, sheet_name="Correlation", index=False, startrow=start_row
             )
@@ -436,15 +490,48 @@ def build_report(
                     recharge_ws.cell(row=bins_start + idx + 1, column=3, value=row["count"])
                 add_recharge_chart(recharge_ws, bins_start, bins_df.shape[0])
 
+        hist_ws = writer.sheets["Hist_nivelPorcentual"]
+        if not hist_df.empty:
+            hist_df_reset = hist_df.reset_index(drop=True)
+            asset_ids = hist_df_reset["asset_id"].astype(str).unique().tolist()
+            for asset_id in asset_ids:
+                group_idx = hist_df_reset.index[hist_df_reset["asset_id"] == asset_id]
+                if group_idx.empty:
+                    continue
+                start = int(group_idx.min()) + 2
+                end = int(group_idx.max()) + 2
+                anchor = f"F{start}"
+                add_histogram_chart(hist_ws, asset_id, start, end, anchor)
+
         corr_ws = writer.sheets["Correlation"]
-        if not scatter_df.empty:
+        if max_scatter_points > 0 and not scatter_df.empty:
             add_correlation_chart(corr_ws, start_row, scatter_df.shape[0])
 
 
 def main() -> None:
     args = parse_args()
     input_dir = Path(args.input_dir)
-    csv_paths = sorted(input_dir.rglob("*.csv"))
+    csv_paths: list[Path] = []
+    asset_dir: Path | None = None
+    if args.asset:
+        asset_key = args.asset.strip().lower()
+        asset_dirs = [
+            path
+            for path in input_dir.iterdir()
+            if path.is_dir() and path.name.strip().lower() == asset_key
+        ]
+        if not asset_dirs:
+            print(
+                f"[warning] No se encontró carpeta para asset '{args.asset}' en {input_dir}"
+            )
+            return
+        asset_dir = asset_dirs[0]
+        csv_paths = sorted(asset_dir.rglob("*.csv"))
+        print(
+            f"[info] Asset filter activo: leyendo {len(csv_paths)} archivos desde '{asset_dir}'"
+        )
+    else:
+        csv_paths = sorted(input_dir.rglob("*.csv"))
     if not csv_paths:
         print(f"[warning] No se encontraron CSVs en {input_dir}")
 
@@ -470,10 +557,55 @@ def main() -> None:
     start_date = parse_date(args.start_date, False, args.freq_minutes)
     end_date = parse_date(args.end_date, True, args.freq_minutes)
 
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    if asset_filter:
+        if args.output:
+            output_path = Path(args.output)
+        else:
+            output_path = Path("reports") / f"tanks_{timestamp}.xlsx"
+        build_report(
+            combined,
+            asset_filter,
+            start_date,
+            end_date,
+            args.freq_minutes,
+            output_path,
+            input_dir,
+            timestamp_strategies,
+            detected_columns,
+            args.max_scatter_points,
+        )
+        print(f"[info] Reporte generado en {output_path}")
+        return
+
+    if args.per_asset or args.all:
+        report_dir = Path("reports")
+        report_dir.mkdir(parents=True, exist_ok=True)
+        asset_ids = sorted(combined["asset_id"].dropna().unique().tolist())
+        if not asset_ids:
+            asset_ids = ["asset"]
+        for asset_id in asset_ids:
+            safe_asset = normalize_asset_filename(str(asset_id))
+            output_path = report_dir / f"tanks_{safe_asset}_{timestamp}.xlsx"
+            build_report(
+                combined,
+                str(asset_id),
+                start_date,
+                end_date,
+                args.freq_minutes,
+                output_path,
+                input_dir,
+                timestamp_strategies,
+                detected_columns,
+                args.max_scatter_points,
+            )
+            print(f"[info] Reporte generado en {output_path}")
+        return
+
     if args.output:
         output_path = Path(args.output)
     else:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_path = Path("reports") / f"tanks_{timestamp}.xlsx"
 
     build_report(
@@ -486,6 +618,7 @@ def main() -> None:
         input_dir,
         timestamp_strategies,
         detected_columns,
+        args.max_scatter_points,
     )
     print(f"[info] Reporte generado en {output_path}")
 

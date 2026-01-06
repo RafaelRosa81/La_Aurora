@@ -32,6 +32,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pct-min", type=float, default=0.0, help="Min % permitido")
     parser.add_argument("--pct-max", type=float, default=100.0, help="Max % permitido")
     parser.add_argument("--max-rows", type=int, default=500, help="Max filas OutOfRange")
+    parser.add_argument(
+        "--sample-size",
+        type=int,
+        default=200000,
+        help="Muestra maxima por asset para percentiles",
+    )
+    parser.add_argument(
+        "--max-files",
+        type=int,
+        help="Limita la cantidad de archivos procesados",
+    )
     parser.add_argument("--output", help="Ruta de salida Excel (default reports/...)")
     parser.add_argument("--plan", help="Ruta de salida CSV plan (default reports/...)")
     return parser.parse_args()
@@ -166,6 +177,48 @@ def to_repo_relative(path: Path, repo_root: Path) -> str:
         return str(path)
 
 
+def update_reservoir(
+    sample: list[float],
+    count: int,
+    values: np.ndarray,
+    sample_size: int,
+    rng: np.random.Generator,
+) -> int:
+    for value in values:
+        count += 1
+        if len(sample) < sample_size:
+            sample.append(float(value))
+        else:
+            idx = rng.integers(0, count)
+            if idx < sample_size:
+                sample[idx] = float(value)
+    return count
+
+
+def update_min_heap(heap: list[tuple[float, dict]], item: dict, limit: int) -> None:
+    import heapq
+
+    value = float(item["value"])
+    entry = (-value, item)
+    if len(heap) < limit:
+        heapq.heappush(heap, entry)
+    else:
+        if entry[0] > heap[0][0]:
+            heapq.heapreplace(heap, entry)
+
+
+def update_max_heap(heap: list[tuple[float, dict]], item: dict, limit: int) -> None:
+    import heapq
+
+    value = float(item["value"])
+    entry = (value, item)
+    if len(heap) < limit:
+        heapq.heappush(heap, entry)
+    else:
+        if entry[0] > heap[0][0]:
+            heapq.heapreplace(heap, entry)
+
+
 def main() -> None:
     args = parse_args()
     input_dir = Path(args.input_dir)
@@ -197,11 +250,16 @@ def main() -> None:
     plan_rows: list[dict] = []
     notes_rows: list[dict] = []
     file_notes: list[dict] = []
-    all_values: list[pd.DataFrame] = []
+    sample_store: dict[str, list[float]] = {}
+    sample_counts: dict[str, int] = {}
+    extremes_store: dict[str, dict[str, list[tuple[float, dict]]]] = {}
+    rng = np.random.default_rng()
 
     csv_files = sorted(input_dir.rglob("*.csv"))
     if not csv_files:
         print(f"[warning] No se encontraron CSVs en {input_dir}")
+    if args.max_files is not None:
+        csv_files = csv_files[: args.max_files]
 
     for file_path in csv_files:
         df, meta = load_csv(file_path)
@@ -232,8 +290,6 @@ def main() -> None:
         )
         if df.empty:
             continue
-
-        all_values.append(df)
 
         for asset_id, asset_df in df.groupby("asset_id"):
             asset_df = asset_df.sort_values("timestamp")
@@ -275,13 +331,25 @@ def main() -> None:
             )
 
             if out_count:
-                outlier_subset = asset_df.loc[out_mask, ["timestamp", "nivelPorcentual"]].copy()
-                outlier_subset["file"] = relative_file
-                outlier_subset["asset_id"] = asset_id
-                outlier_subset["column"] = "nivelPorcentual"
-                outlier_subset["row_index"] = asset_df.loc[out_mask, "__row_index"].values
-                outlier_subset = outlier_subset.rename(columns={"nivelPorcentual": "value"})
-                outlier_rows.append(outlier_subset)
+                remaining = args.max_rows - len(outlier_rows)
+                if remaining > 0:
+                    outlier_subset = asset_df.loc[
+                        out_mask, ["timestamp", "nivelPorcentual", "__row_index"]
+                    ]
+                    outlier_subset = outlier_subset.rename(columns={"nivelPorcentual": "value"})
+                    for row in outlier_subset.itertuples(index=True):
+                        if len(outlier_rows) >= args.max_rows:
+                            break
+                        outlier_rows.append(
+                            {
+                                "file": relative_file,
+                                "asset_id": asset_id,
+                                "timestamp": row.timestamp,
+                                "column": "nivelPorcentual",
+                                "value": row.value,
+                                "row_index": int(row.__row_index),
+                            }
+                        )
 
             if out_count:
                 plan_rows.append(
@@ -298,37 +366,68 @@ def main() -> None:
                     }
                 )
 
-    if all_values:
-        combined = pd.concat(all_values, ignore_index=True)
-        for asset_id, asset_df in combined.groupby("asset_id"):
-            series = asset_df["nivelPorcentual"].dropna()
-            if series.empty:
-                continue
-            sorted_df = asset_df.loc[series.index].sort_values("nivelPorcentual")
-            min_rows = sorted_df.head(50)
-            max_rows = sorted_df.tail(50).sort_values("nivelPorcentual", ascending=False)
-            for label, subset in [("min", min_rows), ("max", max_rows)]:
-                for _, row in subset.iterrows():
-                    extremes_rows.append(
-                        {
-                            "asset_id": asset_id,
-                            "file": row["source_file"],
-                            "timestamp": row["timestamp"],
-                            "column": "nivelPorcentual",
-                            "value": row["nivelPorcentual"],
-                            "type": label,
-                        }
-                    )
+            sample = sample_store.setdefault(asset_id, [])
+            count = sample_counts.get(asset_id, 0)
+            values = series.dropna().to_numpy()
+            if values.size:
+                sample_counts[asset_id] = update_reservoir(
+                    sample, count, values, args.sample_size, rng
+                )
+            store = extremes_store.setdefault(asset_id, {"min": [], "max": []})
+            for row in asset_df.loc[series.notna()].itertuples(index=False):
+                item = {
+                    "asset_id": asset_id,
+                    "file": row.source_file,
+                    "timestamp": row.timestamp,
+                    "column": "nivelPorcentual",
+                    "value": row.nivelPorcentual,
+                }
+                update_min_heap(store["min"], item, 50)
+                update_max_heap(store["max"], item, 50)
 
     if outlier_rows:
-        outlier_df = pd.concat(outlier_rows, ignore_index=True)
-        outlier_df = outlier_df.sort_values("timestamp").head(args.max_rows)
+        outlier_df = pd.DataFrame(outlier_rows)
+        if not outlier_df.empty:
+            outlier_df = outlier_df.sort_values("timestamp").head(args.max_rows)
     else:
         outlier_df = pd.DataFrame(
             columns=["file", "asset_id", "timestamp", "column", "value", "row_index"]
         )
 
     summary_df = pd.DataFrame(summary_rows)
+    if not summary_df.empty:
+        percentiles = []
+        for asset_id in summary_df["asset_id"].unique():
+            sample = sample_store.get(asset_id, [])
+            if sample:
+                values = np.array(sample)
+                values = values[~np.isnan(values)]
+                if values.size:
+                    pcts = np.percentile(values, [1, 50, 99])
+                    percentiles.append(
+                        {
+                            "asset_id": asset_id,
+                            "p1": float(pcts[0]),
+                            "p50": float(pcts[1]),
+                            "p99": float(pcts[2]),
+                        }
+                    )
+        if percentiles:
+            pct_df = pd.DataFrame(percentiles)
+            summary_df = summary_df.merge(pct_df, on="asset_id", how="left", suffixes=("", "_sample"))
+            summary_df["p1"] = summary_df["p1_sample"].combine_first(summary_df["p1"])
+            summary_df["p50"] = summary_df["p50_sample"].combine_first(summary_df["p50"])
+            summary_df["p99"] = summary_df["p99_sample"].combine_first(summary_df["p99"])
+            summary_df = summary_df.drop(columns=["p1_sample", "p50_sample", "p99_sample"])
+
+    for asset_id, store in extremes_store.items():
+        min_items = sorted(store["min"], key=lambda x: x[0], reverse=True)
+        max_items = sorted(store["max"], key=lambda x: x[0], reverse=True)
+        for _, item in min_items:
+            extremes_rows.append({**item, "type": "min"})
+        for _, item in max_items:
+            extremes_rows.append({**item, "type": "max"})
+
     extremes_df = pd.DataFrame(extremes_rows)
     plan_df = pd.DataFrame(plan_rows).drop_duplicates(
         subset=["file", "asset_id", "column", "pct_min", "pct_max", "action"]
@@ -344,6 +443,12 @@ def main() -> None:
             {"parameter": "pct_min", "value": args.pct_min},
             {"parameter": "pct_max", "value": args.pct_max},
             {"parameter": "max_rows", "value": args.max_rows},
+            {"parameter": "sample_size", "value": args.sample_size},
+            {"parameter": "max_files", "value": args.max_files or ""},
+            {
+                "parameter": "percentile_method",
+                "value": f"reservoir_sampling_n={args.sample_size} (aprox)",
+            },
             {"parameter": "output", "value": str(output_path)},
             {"parameter": "plan", "value": str(plan_path)},
         ]

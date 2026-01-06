@@ -1,6 +1,7 @@
 import argparse
 from datetime import datetime
 from pathlib import Path
+import itertools
 
 import numpy as np
 import pandas as pd
@@ -195,11 +196,17 @@ def update_reservoir(
     return count
 
 
-def update_min_heap(heap: list[tuple[float, dict]], item: dict, limit: int) -> None:
+# --- FIX: heap entries deben tener tie-breaker (no comparar dicts) ---
+def update_min_heap(
+    heap: list[tuple[float, int, dict]],
+    item: dict,
+    limit: int,
+    tie: itertools.count,
+) -> None:
     import heapq
 
     value = float(item["value"])
-    entry = (-value, item)
+    entry = (-value, next(tie), item)  # (-value) para quedarnos con los mínimos
     if len(heap) < limit:
         heapq.heappush(heap, entry)
     else:
@@ -207,16 +214,22 @@ def update_min_heap(heap: list[tuple[float, dict]], item: dict, limit: int) -> N
             heapq.heapreplace(heap, entry)
 
 
-def update_max_heap(heap: list[tuple[float, dict]], item: dict, limit: int) -> None:
+def update_max_heap(
+    heap: list[tuple[float, int, dict]],
+    item: dict,
+    limit: int,
+    tie: itertools.count,
+) -> None:
     import heapq
 
     value = float(item["value"])
-    entry = (value, item)
+    entry = (value, next(tie), item)  # (value) para quedarnos con los máximos
     if len(heap) < limit:
         heapq.heappush(heap, entry)
     else:
         if entry[0] > heap[0][0]:
             heapq.heapreplace(heap, entry)
+# --- END FIX ---
 
 
 def main() -> None:
@@ -252,8 +265,11 @@ def main() -> None:
     file_notes: list[dict] = []
     sample_store: dict[str, list[float]] = {}
     sample_counts: dict[str, int] = {}
-    extremes_store: dict[str, dict[str, list[tuple[float, dict]]]] = {}
+    extremes_store: dict[str, dict[str, list]] = {}
     rng = np.random.default_rng()
+
+    # FIX: contador para tie-breaker en heaps
+    tie = itertools.count()
 
     csv_files = sorted(input_dir.rglob("*.csv"))
     if not csv_files:
@@ -333,25 +349,6 @@ def main() -> None:
             if out_count:
                 remaining = args.max_rows - len(outlier_rows)
                 if remaining > 0:
-                '''
-                    outlier_subset = asset_df.loc[
-                        out_mask, ["timestamp", "nivelPorcentual", "__row_index"]
-                    ]
-                    outlier_subset = outlier_subset.rename(columns={"nivelPorcentual": "value"})
-                    for row in outlier_subset.itertuples(index=True):
-                        if len(outlier_rows) >= args.max_rows:
-                            break
-                        outlier_rows.append(
-                            {
-                                "file": relative_file,
-                                "asset_id": asset_id,
-                                "timestamp": row.timestamp,
-                                "column": "nivelPorcentual",
-                                "value": row.value,
-                                "row_index": int(row.__row_index),
-                            }
-                        )
-                '''
                     outlier_subset = asset_df.loc[
                         out_mask, ["timestamp", "nivelPorcentual", "__row_index"]
                     ].copy()
@@ -394,6 +391,7 @@ def main() -> None:
                 sample_counts[asset_id] = update_reservoir(
                     sample, count, values, args.sample_size, rng
                 )
+
             store = extremes_store.setdefault(asset_id, {"min": [], "max": []})
             for row in asset_df.loc[series.notna()].itertuples(index=False):
                 item = {
@@ -403,8 +401,8 @@ def main() -> None:
                     "column": "nivelPorcentual",
                     "value": row.nivelPorcentual,
                 }
-                update_min_heap(store["min"], item, 50)
-                update_max_heap(store["max"], item, 50)
+                update_min_heap(store["min"], item, 50, tie)
+                update_max_heap(store["max"], item, 50, tie)
 
     if outlier_rows:
         outlier_df = pd.DataFrame(outlier_rows)
@@ -435,18 +433,21 @@ def main() -> None:
                     )
         if percentiles:
             pct_df = pd.DataFrame(percentiles)
-            summary_df = summary_df.merge(pct_df, on="asset_id", how="left", suffixes=("", "_sample"))
+            summary_df = summary_df.merge(
+                pct_df, on="asset_id", how="left", suffixes=("", "_sample")
+            )
             summary_df["p1"] = summary_df["p1_sample"].combine_first(summary_df["p1"])
             summary_df["p50"] = summary_df["p50_sample"].combine_first(summary_df["p50"])
             summary_df["p99"] = summary_df["p99_sample"].combine_first(summary_df["p99"])
             summary_df = summary_df.drop(columns=["p1_sample", "p50_sample", "p99_sample"])
 
+    # FIX: ahora heap entries son (value, tie, item)
     for asset_id, store in extremes_store.items():
-        min_items = sorted(store["min"], key=lambda x: x[0], reverse=True)
-        max_items = sorted(store["max"], key=lambda x: x[0], reverse=True)
-        for _, item in min_items:
+        min_items = sorted(store["min"], key=lambda x: x[0], reverse=True)  # (-value, ...)
+        max_items = sorted(store["max"], key=lambda x: x[0], reverse=True)  # (value, ...)
+        for _, _, item in min_items:
             extremes_rows.append({**item, "type": "min"})
-        for _, item in max_items:
+        for _, _, item in max_items:
             extremes_rows.append({**item, "type": "max"})
 
     extremes_df = pd.DataFrame(extremes_rows)

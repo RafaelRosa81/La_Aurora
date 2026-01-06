@@ -333,6 +333,7 @@ def main() -> None:
             if out_count:
                 remaining = args.max_rows - len(outlier_rows)
                 if remaining > 0:
+                '''
                     outlier_subset = asset_df.loc[
                         out_mask, ["timestamp", "nivelPorcentual", "__row_index"]
                     ]
@@ -348,6 +349,26 @@ def main() -> None:
                                 "column": "nivelPorcentual",
                                 "value": row.value,
                                 "row_index": int(row.__row_index),
+                            }
+                        )
+                '''
+                    outlier_subset = asset_df.loc[
+                        out_mask, ["timestamp", "nivelPorcentual", "__row_index"]
+                    ].copy()
+
+                    outlier_subset = outlier_subset.rename(columns={"nivelPorcentual": "value"})
+
+                    for rec in outlier_subset.to_dict("records"):
+                        if len(outlier_rows) >= args.max_rows:
+                            break
+                        outlier_rows.append(
+                            {
+                                "file": relative_file,
+                                "asset_id": asset_id,
+                                "timestamp": rec.get("timestamp"),
+                                "column": "nivelPorcentual",
+                                "value": rec.get("value"),
+                                "row_index": int(rec.get("__row_index", -1)),
                             }
                         )
 

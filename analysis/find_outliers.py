@@ -2,6 +2,7 @@ import argparse
 from datetime import datetime
 from pathlib import Path
 import itertools
+import re
 
 import numpy as np
 import pandas as pd
@@ -90,18 +91,63 @@ def detect_level_columns(df: pd.DataFrame) -> dict[str, str]:
     return detected
 
 
+_TIME_RE = re.compile(r"^\s*(\d{1,2}):(\d{2})\s*([AaPp][Mm])\s*$")
+
+
+def normalize_asset_id(value: object, fallback: str) -> str:
+    """
+    Normaliza asset_id para que quede estable:
+    - trim
+    - colapsa espacios raros
+    - si vino como hora tipo '6:00 AM', intenta mapear a '6 A' / '6 P'
+    """
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return fallback
+
+    s = str(value).strip()
+    if not s:
+        return fallback
+
+    # Normalizar espacios "raros"
+    s = s.replace("\u00A0", " ")
+    s = re.sub(r"\s+", " ", s).strip()
+
+    # Si por algún motivo entró como hora (por export/Excel)
+    m = _TIME_RE.match(s)
+    if m:
+        hour = int(m.group(1))
+        ampm = m.group(3).upper()
+        # Tu convención real en carpetas es "6 A", "7 B"...,
+        # pero para casos AM/PM al menos evitamos el "6:00 AM"
+        suffix = "A" if ampm == "AM" else "P"
+        return f"{hour} {suffix}"
+
+    return s
+
+
+def asset_id_excel_safe(asset_id: str) -> str:
+    """
+    Columna SOLO para abrir en Excel sin que convierta '6 A' => '6:00 AM'.
+    El apóstrofo inicial fuerza texto en Excel.
+    """
+    return "'" + asset_id
+
+
 def determine_asset_series(df: pd.DataFrame, file_path: Path) -> pd.Series:
     lower_map = {col.lower(): col for col in df.columns}
     folder_name = file_path.parent.name
     prefix = file_path.stem.split("_")[0]
     fallback = folder_name or prefix
+
     asset_col = lower_map.get("asset_label")
     if asset_col:
         series = df[asset_col]
         if series.notna().any():
-            series = series.astype(str).str.strip()
-            series = series.where(series != "", fallback)
-            return series
+            # Normalizamos cada valor; si queda vacío, usamos fallback
+            cleaned = series.apply(lambda v: normalize_asset_id(v, fallback))
+            cleaned = cleaned.where(cleaned.astype(str).str.strip() != "", fallback)
+            return cleaned
+
     return pd.Series([fallback] * len(df), index=df.index)
 
 
@@ -119,16 +165,20 @@ def load_csv(file_path: Path) -> tuple[pd.DataFrame | None, dict]:
 
     df["__row_index"] = df.index
     df["timestamp"], strategy = parse_timestamp(df[timestamp_col])
+
     invalid_count = int(df["timestamp"].isna().sum())
     if invalid_count:
         print(f"[warning] {file_path} tiene {invalid_count} filas con timestamp inválido")
+
     df = df[df["timestamp"].notna()].copy()
     if df.empty:
         return None, {"timestamp_strategy": strategy, "detected_columns": []}
 
     df["asset_id"] = determine_asset_series(df, file_path)
+
     level_columns = detect_level_columns(df)
     detected = list(level_columns.keys())
+
     for canonical, original in level_columns.items():
         df[canonical] = pd.to_numeric(df[original], errors="coerce")
 
@@ -196,7 +246,7 @@ def update_reservoir(
     return count
 
 
-# --- FIX: heap entries deben tener tie-breaker (no comparar dicts) ---
+# heap entries con tie-breaker (para no comparar dicts)
 def update_min_heap(
     heap: list[tuple[float, int, dict]],
     item: dict,
@@ -229,7 +279,6 @@ def update_max_heap(
     else:
         if entry[0] > heap[0][0]:
             heapq.heapreplace(heap, entry)
-# --- END FIX ---
 
 
 def main() -> None:
@@ -268,7 +317,6 @@ def main() -> None:
     extremes_store: dict[str, dict[str, list]] = {}
     rng = np.random.default_rng()
 
-    # FIX: contador para tie-breaker en heaps
     tie = itertools.count()
 
     csv_files = sorted(input_dir.rglob("*.csv"))
@@ -280,6 +328,7 @@ def main() -> None:
     for file_path in csv_files:
         df, meta = load_csv(file_path)
         relative_file = to_repo_relative(file_path, repo_root)
+
         if df is None:
             file_notes.append(
                 {
@@ -295,6 +344,7 @@ def main() -> None:
         df = df.copy()
         df["source_file"] = relative_file
         df = apply_filters(df, asset_pattern, start_date, end_date)
+
         file_notes.append(
             {
                 "file": relative_file,
@@ -310,18 +360,20 @@ def main() -> None:
         for asset_id, asset_df in df.groupby("asset_id"):
             asset_df = asset_df.sort_values("timestamp")
             series = asset_df["nivelPorcentual"]
+
             total = int(series.shape[0])
             valid = int(series.notna().sum())
             missing = total - valid
-            out_mask = series.notna() & (
-                (series < args.pct_min) | (series > args.pct_max)
-            )
+
+            out_mask = series.notna() & ((series < args.pct_min) | (series > args.pct_max))
             out_count = int(out_mask.sum())
             out_pct = (out_count / total * 100.0) if total else 0.0
+
             percentiles = compute_percentiles(series, [1, 50, 99])
             in_range = series.notna() & ~out_mask
             min_in_range = float(series[in_range].min()) if in_range.any() else np.nan
             max_in_range = float(series[in_range].max()) if in_range.any() else np.nan
+
             date_min = asset_df["timestamp"].min()
             date_max = asset_df["timestamp"].max()
 
@@ -329,6 +381,7 @@ def main() -> None:
                 {
                     "file": relative_file,
                     "asset_id": asset_id,
+                    "asset_id_excel": asset_id_excel_safe(asset_id),
                     "n_rows": total,
                     "n_valid_pct": valid,
                     "n_missing_pct": missing,
@@ -352,9 +405,7 @@ def main() -> None:
                     outlier_subset = asset_df.loc[
                         out_mask, ["timestamp", "nivelPorcentual", "__row_index"]
                     ].copy()
-
                     outlier_subset = outlier_subset.rename(columns={"nivelPorcentual": "value"})
-
                     for rec in outlier_subset.to_dict("records"):
                         if len(outlier_rows) >= args.max_rows:
                             break
@@ -362,6 +413,7 @@ def main() -> None:
                             {
                                 "file": relative_file,
                                 "asset_id": asset_id,
+                                "asset_id_excel": asset_id_excel_safe(asset_id),
                                 "timestamp": rec.get("timestamp"),
                                 "column": "nivelPorcentual",
                                 "value": rec.get("value"),
@@ -374,6 +426,7 @@ def main() -> None:
                     {
                         "file": relative_file,
                         "asset_id": asset_id,
+                        "asset_id_excel": asset_id_excel_safe(asset_id),
                         "column": "nivelPorcentual",
                         "pct_min": args.pct_min,
                         "pct_max": args.pct_max,
@@ -388,14 +441,13 @@ def main() -> None:
             count = sample_counts.get(asset_id, 0)
             values = series.dropna().to_numpy()
             if values.size:
-                sample_counts[asset_id] = update_reservoir(
-                    sample, count, values, args.sample_size, rng
-                )
+                sample_counts[asset_id] = update_reservoir(sample, count, values, args.sample_size, rng)
 
             store = extremes_store.setdefault(asset_id, {"min": [], "max": []})
             for row in asset_df.loc[series.notna()].itertuples(index=False):
                 item = {
                     "asset_id": asset_id,
+                    "asset_id_excel": asset_id_excel_safe(asset_id),
                     "file": row.source_file,
                     "timestamp": row.timestamp,
                     "column": "nivelPorcentual",
@@ -410,7 +462,7 @@ def main() -> None:
             outlier_df = outlier_df.sort_values("timestamp").head(args.max_rows)
     else:
         outlier_df = pd.DataFrame(
-            columns=["file", "asset_id", "timestamp", "column", "value", "row_index"]
+            columns=["file", "asset_id", "asset_id_excel", "timestamp", "column", "value", "row_index"]
         )
 
     summary_df = pd.DataFrame(summary_rows)
@@ -433,16 +485,13 @@ def main() -> None:
                     )
         if percentiles:
             pct_df = pd.DataFrame(percentiles)
-            summary_df = summary_df.merge(
-                pct_df, on="asset_id", how="left", suffixes=("", "_sample")
-            )
+            summary_df = summary_df.merge(pct_df, on="asset_id", how="left", suffixes=("", "_sample"))
             summary_df["p1"] = summary_df["p1_sample"].combine_first(summary_df["p1"])
             summary_df["p50"] = summary_df["p50_sample"].combine_first(summary_df["p50"])
             summary_df["p99"] = summary_df["p99_sample"].combine_first(summary_df["p99"])
             summary_df = summary_df.drop(columns=["p1_sample", "p50_sample", "p99_sample"])
 
-    # FIX: ahora heap entries son (value, tie, item)
-    for asset_id, store in extremes_store.items():
+    for _, store in extremes_store.items():
         min_items = sorted(store["min"], key=lambda x: x[0], reverse=True)  # (-value, ...)
         max_items = sorted(store["max"], key=lambda x: x[0], reverse=True)  # (value, ...)
         for _, _, item in min_items:
@@ -454,6 +503,7 @@ def main() -> None:
     plan_df = pd.DataFrame(plan_rows).drop_duplicates(
         subset=["file", "asset_id", "column", "pct_min", "pct_max", "action"]
     )
+
     notes_rows.extend(
         [
             {"parameter": "input_dir", "value": str(input_dir)},
@@ -467,14 +517,16 @@ def main() -> None:
             {"parameter": "max_rows", "value": args.max_rows},
             {"parameter": "sample_size", "value": args.sample_size},
             {"parameter": "max_files", "value": args.max_files or ""},
+            {"parameter": "percentile_method", "value": f"reservoir_sampling_n={args.sample_size} (aprox)"},
             {
-                "parameter": "percentile_method",
-                "value": f"reservoir_sampling_n={args.sample_size} (aprox)",
+                "parameter": "excel_note",
+                "value": "Excel puede mostrar '6 A' como '6:00 AM'. Usar asset_id_excel para visualizar sin autoformato.",
             },
             {"parameter": "output", "value": str(output_path)},
             {"parameter": "plan", "value": str(plan_path)},
         ]
     )
+
     params_df = pd.DataFrame(notes_rows)
     file_notes_df = pd.DataFrame(file_notes)
 

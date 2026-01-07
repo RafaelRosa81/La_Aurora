@@ -1,4 +1,11 @@
-#Funciona en ambiente la_aurora
+# Funciona en ambiente la_aurora
+# FIX 2026-01-06:
+# - --all ahora genera:
+#   1) un Excel global "all" con todos los assets
+#   2) un Excel por asset, cada uno con SOLO ese asset (no contenido repetido)
+# - build_report ya no hace combined.copy() (evita costo de memoria)
+# - Cuando el DataFrame viene filtrado a un solo asset, build_report lo procesa como "single asset"
+# - groupby usa observed=True y sort=False para performance/memoria
 
 import argparse
 from datetime import datetime
@@ -31,7 +38,7 @@ def parse_args() -> argparse.Namespace:
         "--all",
         action="store_true",
         default=False,
-        help="Procesa todos los assets detectados (default)",
+        help="Procesa todos los assets detectados",
     )
     parser.add_argument(
         "--per-asset",
@@ -296,8 +303,8 @@ def add_summary_chart(ws, summary_df: pd.DataFrame) -> None:
     chart.set_categories(categories)
     chart.height = 8
     chart.width = 16
-    #ws.add_chart(chart, f"{chr(missing_col + 2)}2")
     ws.add_chart(chart, f"{get_column_letter(missing_col + 2)}2")
+
 
 def add_recharge_chart(ws, start_row: int, bins_count: int) -> None:
     if bins_count <= 0:
@@ -331,9 +338,7 @@ def add_correlation_chart(ws, start_row: int, data_rows: int) -> None:
     ws.add_chart(chart, f"E{start_row}")
 
 
-def add_histogram_chart(
-    ws, asset_id: str, start_row: int, end_row: int, anchor: str
-) -> None:
+def add_histogram_chart(ws, asset_id: str, start_row: int, end_row: int, anchor: str) -> None:
     if end_row < start_row:
         return
     chart = BarChart()
@@ -374,69 +379,124 @@ def build_report(
     scatter_rows = []
     missing_notes = []
 
-    filtered = combined.copy()
+    # FIX: no copiar el DF completo (memoria). Si hay filtros de fecha se aplican por asset.
+    filtered = combined
 
     percentiles = [1, 5, 10, 25, 50, 75, 90, 95, 99]
 
-    for asset_id, asset_df in filtered.groupby("asset_id"):
+    # Si viene filtrado a un solo asset, lo procesamos directo sin groupby.
+    unique_assets = filtered["asset_id"].dropna().unique().tolist()
+    single_asset_mode = False
+    single_asset_id = None
+    if asset_filter is not None:
+        # Nota: en --asset puede venir nombre/parcial. Aquí NO hacemos contains, eso ya se resuelve antes.
+        # En el flujo "per asset" y "all", asset_filter es exacto.
+        single_asset_mode = True
+        single_asset_id = asset_filter
+
+    if single_asset_mode:
+        asset_id = single_asset_id
+        asset_df = filtered
+        # aplicar filtros de fecha
         asset_df = asset_df.sort_values("timestamp")
-        if start_date:
+        if start_date is not None:
             asset_df = asset_df[asset_df["timestamp"] >= start_date]
-        if end_date:
+        if end_date is not None:
             asset_df = asset_df[asset_df["timestamp"] <= end_date]
         if asset_df.empty:
             print(f"[warning] Asset {asset_id} sin datos en el rango")
-            continue
+        else:
+            date_min = asset_df["timestamp"].min()
+            date_max = asset_df["timestamp"].max()
 
-        date_min = asset_df["timestamp"].min()
-        date_max = asset_df["timestamp"].max()
+            summary = {"asset_id": asset_id, "date_min": date_min, "date_max": date_max}
+            for canonical in LEVEL_COLUMNS.values():
+                series = asset_df[canonical]
+                stats = compute_stats(series)
+                summary.update({f"{canonical}_{key}": value for key, value in stats.items()})
+                perc = compute_percentiles(series, percentiles)
+                for pct, value in perc.items():
+                    percentiles_rows.append(
+                        {"asset_id": asset_id, "variable": canonical, "percentile": f"P{pct}", "value": value}
+                    )
 
-        summary = {"asset_id": asset_id, "date_min": date_min, "date_max": date_max}
-        for canonical in LEVEL_COLUMNS.values():
-            series = asset_df[canonical]
-            stats = compute_stats(series)
-            summary.update({f"{canonical}_{key}": value for key, value in stats.items()})
-            perc = compute_percentiles(series, percentiles)
-            for pct, value in perc.items():
-                percentiles_rows.append(
-                    {
-                        "asset_id": asset_id,
-                        "variable": canonical,
-                        "percentile": f"P{pct}",
-                        "value": value,
-                    }
-                )
+                if canonical == "nivelPorcentual":
+                    hist_df = compute_histogram(series, bins=20)
+                    if not hist_df.empty:
+                        hist_df.insert(0, "asset_id", asset_id)
+                        hist_rows.append(hist_df)
+                    if series.dropna().empty:
+                        missing_notes.append(f"{asset_id}: sin datos nivelPorcentual")
 
-            if canonical == "nivelPorcentual":
-                hist_df = compute_histogram(series, bins=20)
-                if not hist_df.empty:
-                    hist_df.insert(0, "asset_id", asset_id)
-                    hist_rows.append(hist_df)
-                if series.dropna().empty:
-                    missing_notes.append(f"{asset_id}: sin datos nivelPorcentual")
+            summary_rows.append(summary)
+            events_rows.extend(detect_recharge_events(asset_id, asset_df))
 
-        summary_rows.append(summary)
+            if asset_df[["nivelPorcentual", "nivelEstanque"]].dropna().shape[0] >= 2:
+                corr_summary, scatter = compute_correlation(asset_id, asset_df, max_scatter_points)
+                if corr_summary:
+                    correlation_rows.append(corr_summary)
+                if not scatter.empty:
+                    scatter_rows.append(scatter)
+    else:
+        # Modo global: procesar por asset
+        # FIX: usar category/observed para performance
+        filtered = filtered.copy()
+        filtered["asset_id"] = filtered["asset_id"].astype("category")
 
-        events_rows.extend(detect_recharge_events(asset_id, asset_df))
+        for asset_id, asset_df in filtered.groupby("asset_id", sort=False, observed=True):
+            asset_df = asset_df.sort_values("timestamp")
+            if start_date is not None:
+                asset_df = asset_df[asset_df["timestamp"] >= start_date]
+            if end_date is not None:
+                asset_df = asset_df[asset_df["timestamp"] <= end_date]
+            if asset_df.empty:
+                continue
 
-        if asset_df[["nivelPorcentual", "nivelEstanque"]].dropna().shape[0] >= 2:
-            corr_summary, scatter = compute_correlation(
-                asset_id, asset_df, max_scatter_points
-            )
-            if corr_summary:
-                correlation_rows.append(corr_summary)
-            if not scatter.empty:
-                scatter_rows.append(scatter)
+            date_min = asset_df["timestamp"].min()
+            date_max = asset_df["timestamp"].max()
+
+            summary = {"asset_id": asset_id, "date_min": date_min, "date_max": date_max}
+            for canonical in LEVEL_COLUMNS.values():
+                series = asset_df[canonical]
+                stats = compute_stats(series)
+                summary.update({f"{canonical}_{key}": value for key, value in stats.items()})
+                perc = compute_percentiles(series, percentiles)
+                for pct, value in perc.items():
+                    percentiles_rows.append(
+                        {"asset_id": asset_id, "variable": canonical, "percentile": f"P{pct}", "value": value}
+                    )
+
+                if canonical == "nivelPorcentual":
+                    hist_df = compute_histogram(series, bins=20)
+                    if not hist_df.empty:
+                        hist_df.insert(0, "asset_id", asset_id)
+                        hist_rows.append(hist_df)
+                    if series.dropna().empty:
+                        missing_notes.append(f"{asset_id}: sin datos nivelPorcentual")
+
+            summary_rows.append(summary)
+            events_rows.extend(detect_recharge_events(str(asset_id), asset_df))
+
+            if asset_df[["nivelPorcentual", "nivelEstanque"]].dropna().shape[0] >= 2:
+                corr_summary, scatter = compute_correlation(str(asset_id), asset_df, max_scatter_points)
+                if corr_summary:
+                    correlation_rows.append(corr_summary)
+                if not scatter.empty:
+                    scatter_rows.append(scatter)
 
     summary_df = pd.DataFrame(summary_rows)
     percentiles_df = pd.DataFrame(percentiles_rows)
-    hist_df = pd.concat(hist_rows, ignore_index=True) if hist_rows else pd.DataFrame(
-        columns=["asset_id", "bin_left", "bin_right", "count"]
+    hist_df = (
+        pd.concat(hist_rows, ignore_index=True)
+        if hist_rows
+        else pd.DataFrame(columns=["asset_id", "bin_left", "bin_right", "count"])
     )
     events_df = pd.DataFrame(events_rows)
     correlation_df = pd.DataFrame(correlation_rows)
-    scatter_df = pd.concat(scatter_rows, ignore_index=True) if scatter_rows else pd.DataFrame(
-        columns=["asset_id", "nivelPorcentual", "nivelEstanque"]
+    scatter_df = (
+        pd.concat(scatter_rows, ignore_index=True)
+        if scatter_rows
+        else pd.DataFrame(columns=["asset_id", "nivelPorcentual", "nivelEstanque"])
     )
 
     notes_rows = [
@@ -467,9 +527,7 @@ def build_report(
         correlation_df.to_excel(writer, sheet_name="Correlation", index=False)
         start_row = len(correlation_df) + 3
         if max_scatter_points > 0 and not scatter_df.empty:
-            scatter_df.to_excel(
-                writer, sheet_name="Correlation", index=False, startrow=start_row
-            )
+            scatter_df.to_excel(writer, sheet_name="Correlation", index=False, startrow=start_row)
         notes_df.to_excel(writer, sheet_name="Notes", index=False, header=False)
 
         summary_ws = writer.sheets["Summary"]
@@ -495,13 +553,13 @@ def build_report(
             hist_df_reset = hist_df.reset_index(drop=True)
             asset_ids = hist_df_reset["asset_id"].astype(str).unique().tolist()
             for asset_id in asset_ids:
-                group_idx = hist_df_reset.index[hist_df_reset["asset_id"] == asset_id]
+                group_idx = hist_df_reset.index[hist_df_reset["asset_id"].astype(str) == str(asset_id)]
                 if group_idx.empty:
                     continue
                 start = int(group_idx.min()) + 2
                 end = int(group_idx.max()) + 2
                 anchor = f"F{start}"
-                add_histogram_chart(hist_ws, asset_id, start, end, anchor)
+                add_histogram_chart(hist_ws, str(asset_id), start, end, anchor)
 
         corr_ws = writer.sheets["Correlation"]
         if max_scatter_points > 0 and not scatter_df.empty:
@@ -511,8 +569,11 @@ def build_report(
 def main() -> None:
     args = parse_args()
     input_dir = Path(args.input_dir)
+
     csv_paths: list[Path] = []
     asset_dir: Path | None = None
+
+    # Si --asset: se comporta como antes (carpeta exacta)
     if args.asset:
         asset_key = args.asset.strip().lower()
         asset_dirs = [
@@ -521,17 +582,14 @@ def main() -> None:
             if path.is_dir() and path.name.strip().lower() == asset_key
         ]
         if not asset_dirs:
-            print(
-                f"[warning] No se encontró carpeta para asset '{args.asset}' en {input_dir}"
-            )
+            print(f"[warning] No se encontró carpeta para asset '{args.asset}' en {input_dir}")
             return
         asset_dir = asset_dirs[0]
         csv_paths = sorted(asset_dir.rglob("*.csv"))
-        print(
-            f"[info] Asset filter activo: leyendo {len(csv_paths)} archivos desde '{asset_dir}'"
-        )
+        print(f"[info] Asset filter activo: leyendo {len(csv_paths)} archivos desde '{asset_dir}'")
     else:
         csv_paths = sorted(input_dir.rglob("*.csv"))
+
     if not csv_paths:
         print(f"[warning] No se encontraron CSVs en {input_dir}")
 
@@ -553,20 +611,22 @@ def main() -> None:
     else:
         combined = pd.DataFrame(columns=["asset_id", "timestamp", *LEVEL_COLUMNS.values()])
 
-    asset_filter = args.asset if args.asset else None
     start_date = parse_date(args.start_date, False, args.freq_minutes)
     end_date = parse_date(args.end_date, True, args.freq_minutes)
-
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    if asset_filter:
+    # Caso: --asset (un único excel)
+    if args.asset:
         if args.output:
             output_path = Path(args.output)
         else:
             output_path = Path("reports") / f"tanks_{timestamp}.xlsx"
+
+        # Filtrar combinado a ese asset_id exacto (por carpeta)
+        # Nota: si el asset_id dentro de los CSV no coincide con la carpeta, igual deja todo lo leído.
         build_report(
             combined,
-            asset_filter,
+            args.asset,
             start_date,
             end_date,
             args.freq_minutes,
@@ -579,17 +639,39 @@ def main() -> None:
         print(f"[info] Reporte generado en {output_path}")
         return
 
-    if args.per_asset or args.all:
-        report_dir = Path("reports")
-        report_dir.mkdir(parents=True, exist_ok=True)
+    report_dir = Path("reports")
+    report_dir.mkdir(parents=True, exist_ok=True)
+
+    # FIX: si --all => primero generar el global ALL, luego per-asset
+    if args.all:
+        output_all = report_dir / f"tanks_all_{timestamp}.xlsx"
+        build_report(
+            combined,
+            None,  # global
+            start_date,
+            end_date,
+            args.freq_minutes,
+            output_all,
+            input_dir,
+            timestamp_strategies,
+            detected_columns,
+            args.max_scatter_points,
+        )
+        print(f"[info] Reporte ALL generado en {output_all}")
+
+        # luego per-asset
         asset_ids = sorted(combined["asset_id"].dropna().unique().tolist())
         if not asset_ids:
             asset_ids = ["asset"]
+
         for asset_id in asset_ids:
             safe_asset = normalize_asset_filename(str(asset_id))
             output_path = report_dir / f"tanks_{safe_asset}_{timestamp}.xlsx"
+
+            # FIX CLAVE: filtrar el DF al asset (así el Excel no incluye otros)
+            asset_only = combined[combined["asset_id"].astype(str) == str(asset_id)]
             build_report(
-                combined,
+                asset_only,
                 str(asset_id),
                 start_date,
                 end_date,
@@ -603,14 +685,41 @@ def main() -> None:
             print(f"[info] Reporte generado en {output_path}")
         return
 
+    # Caso: --per-asset (solo per-asset, sin ALL)
+    if args.per_asset:
+        asset_ids = sorted(combined["asset_id"].dropna().unique().tolist())
+        if not asset_ids:
+            asset_ids = ["asset"]
+
+        for asset_id in asset_ids:
+            safe_asset = normalize_asset_filename(str(asset_id))
+            output_path = report_dir / f"tanks_{safe_asset}_{timestamp}.xlsx"
+
+            asset_only = combined[combined["asset_id"].astype(str) == str(asset_id)]
+            build_report(
+                asset_only,
+                str(asset_id),
+                start_date,
+                end_date,
+                args.freq_minutes,
+                output_path,
+                input_dir,
+                timestamp_strategies,
+                detected_columns,
+                args.max_scatter_points,
+            )
+            print(f"[info] Reporte generado en {output_path}")
+        return
+
+    # Default: un solo Excel global (como antes)
     if args.output:
         output_path = Path(args.output)
     else:
-        output_path = Path("reports") / f"tanks_{timestamp}.xlsx"
+        output_path = report_dir / f"tanks_{timestamp}.xlsx"
 
     build_report(
         combined,
-        asset_filter,
+        None,
         start_date,
         end_date,
         args.freq_minutes,

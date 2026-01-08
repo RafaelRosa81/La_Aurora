@@ -1,0 +1,32 @@
+timezone: America/Montevideo
+output_dir: output/datos_def
+
+targets:
+  - name: estanques
+    asset_type: "La Aurora - Estanques"
+    keys:
+      - nivelPorcentual
+      - nivelEstanque
+      - volumen
+      - consumo
+      - consumoMensual
+      - noHayDatos
+
+  - name: bombas
+    asset_type: "La Aurora - Bombas"
+    keys:
+      - estadoOn
+      - timeOn
+      - onoff
+
+  - name: presion
+    asset_type: "La Aurora - Presion"
+    keys:
+      - presion
+
+  - name: macro_caudalimetro
+    asset_type: "La Aurora - Macro caudalimetro"
+    keys:
+      - caudal
+      - volumenAgua
+      - volumenAguaPlot

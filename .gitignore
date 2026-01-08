@@ -20,3 +20,7 @@ __pycache__/
 # --- OS/IDE ---
 .vscode/
 .DS_Store
+
+# local stuff
+prompts.txt
+scripts/export_monthly_rest_backup.py

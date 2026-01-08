@@ -41,3 +41,17 @@ Los archivos CSV se guardarán en el directorio indicado por `OUTPUT_DIR`.
 Uso principal: export_monthly_rest.py
 
 Uso principal: export_monthly_rest.py
+
+## Uso (export mensual REST)
+
+El exportador principal es:
+
+- `scripts/export_monthly_rest.py` (REST + CSV)
+- Configurado por `config/export_plan.yaml` (timezone, output_dir, targets)
+
+Ejemplos:
+
+Exportar todo el plan (todos los targets):
+
+```bash
+python scripts/export_monthly_rest.py --start-ym 2024-01 --end-ym 2025-12 --resume

@@ -4,23 +4,71 @@ import os
 import csv
 import calendar
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo  # Python 3.9+
 
 import requests
+import yaml
 from dotenv import load_dotenv
 
 
-ASSET_TYPES = {
-    "estanques": "La Aurora - Estanques",
-    "bombas": "La Aurora - Bombas",
-}
+# ----------------------------
+# Config (YAML export plan)
+# ----------------------------
 
-KEYS = {
-    "estanques": ["nivelPorcentual", "nivelEstanque"],
-    "bombas": ["estadoOn", "timeOn"],
-}
+DEFAULT_PLAN_PATH = "config/export_plan.yaml"
 
+
+@dataclass(frozen=True)
+class ExportTarget:
+    name: str
+    asset_type: str
+    keys: list[str]
+
+
+@dataclass(frozen=True)
+class ExportPlan:
+    timezone: str
+    output_dir: str
+    targets: list[ExportTarget]
+
+
+def load_export_plan(path: str) -> ExportPlan:
+    with open(path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+
+    if not isinstance(data, dict):
+        raise ValueError(f"Config inválido: {path}")
+
+    tz_name = data.get("timezone")
+    out_dir = data.get("output_dir")
+    targets_data = data.get("targets")
+
+    if not tz_name or not out_dir or not isinstance(targets_data, list) or not targets_data:
+        raise ValueError(f"Config incompleto: {path} (requiere timezone, output_dir, targets[])")
+
+    targets: list[ExportTarget] = []
+    for entry in targets_data:
+        if not isinstance(entry, dict):
+            raise ValueError(f"Target inválido en {path}: {entry}")
+        name = entry.get("name")
+        asset_type = entry.get("asset_type")
+        keys = entry.get("keys")
+        if not name or not asset_type or not isinstance(keys, list) or not keys:
+            raise ValueError(f"Target incompleto en {path}: {entry}")
+        # normalizar keys a strings
+        keys = [str(k).strip() for k in keys if str(k).strip()]
+        if not keys:
+            raise ValueError(f"Target sin keys en {path}: {entry}")
+        targets.append(ExportTarget(name=str(name).strip(), asset_type=str(asset_type).strip(), keys=keys))
+
+    return ExportPlan(timezone=str(tz_name).strip(), output_dir=str(out_dir).strip(), targets=targets)
+
+
+# ----------------------------
+# Helpers
+# ----------------------------
 
 def sanitize(s: str) -> str:
     """Seguro para Windows."""
@@ -42,7 +90,7 @@ def ms(dt: datetime) -> int:
 
 def month_ranges(start_ym: str, end_ym: str, tz_local: ZoneInfo):
     """
-    Rangos mensuales definidos en tz_local (ej. America/Santiago).
+    Rangos mensuales definidos en tz_local.
     Retorna datetimes timezone-aware en tz_local.
     """
     sy, sm = map(int, start_ym.split("-"))
@@ -64,6 +112,40 @@ def month_ranges(start_ym: str, end_ym: str, tz_local: ZoneInfo):
             m = 1
             y += 1
 
+
+def file_exists_and_nonempty(path: str) -> bool:
+    """True si el archivo existe y tiene contenido."""
+    try:
+        return os.path.isfile(path) and os.path.getsize(path) > 0
+    except OSError:
+        return False
+
+
+def parse_only_list(s: str | None):
+    if not s:
+        return None
+    parts = [p.strip() for p in s.split(",")]
+    return {p for p in parts if p}
+
+
+def parse_targets_list(s: str | None):
+    if not s:
+        return None
+    parts = [p.strip() for p in s.split(",")]
+    return {p for p in parts if p}
+
+
+def asset_matches(asset: dict, only_set: set[str] | None) -> bool:
+    if not only_set:
+        return True
+    name = (asset.get("name") or "").strip()
+    label = (asset.get("label") or "").strip()
+    return (name in only_set) or (label in only_set)
+
+
+# ----------------------------
+# REST calls
+# ----------------------------
 
 def get_customer_id(base: str, headers: dict) -> str:
     me = requests.get(f"{base}/api/auth/user", headers=headers, timeout=30)
@@ -97,6 +179,15 @@ def fetch_timeseries(base: str, headers: dict, asset_id: str, keys: list[str], s
         "limit": 50000,
     }
     r = requests.get(url, headers=headers, params=params, timeout=120)
+
+    if r.status_code == 401:
+        raise RuntimeError(
+            "HTTP 401 (Unauthorized). TB_TOKEN vencido/incorrecto.\n"
+            "→ Actualiza TB_TOKEN en .env y reintenta.\n"
+            "→ Sugerencia: usa --resume para retomar sin sobreescribir.\n"
+            f"URL: {r.url}"
+        )
+
     r.raise_for_status()
     return r.json()
 
@@ -128,42 +219,22 @@ def write_csv(path, asset, y, m, payload):
             row.update(rows[ts])
             w.writerow(row)
 
-def file_exists_and_nonempty(path: str) -> bool:
-    """True si el archivo existe y tiene contenido."""
-    try:
-        return os.path.isfile(path) and os.path.getsize(path) > 0
-    except OSError:
-        return False
 
-
-def parse_only_list(s: str | None):
-    if not s:
-        return None
-    parts = [p.strip() for p in s.split(",")]
-    return {p for p in parts if p}
-
-
-def asset_matches(asset: dict, only_set: set[str] | None) -> bool:
-    if not only_set:
-        return True
-    name = (asset.get("name") or "").strip()
-    label = (asset.get("label") or "").strip()
-    return (name in only_set) or (label in only_set)
-
+# ----------------------------
+# CLI
+# ----------------------------
 
 def parse_args():
     p = argparse.ArgumentParser(
-        description="Export mensual a CSV (REST) para estanques y bombas (rangos definidos en zona horaria local).",
+        description="Export mensual a CSV (REST) con targets definidos en un plan YAML.",
     )
     p.add_argument("--start-ym", required=True, help="Inicio YYYY-MM (ej: 2024-01)")
     p.add_argument("--end-ym", required=True, help="Fin YYYY-MM (ej: 2025-12)")
-    p.add_argument("--outdir", default="output/monthly", help="Directorio de salida")
+    p.add_argument("--config", default=DEFAULT_PLAN_PATH, help="Ruta al plan YAML (default: config/export_plan.yaml)")
     p.add_argument(
-        "--groups",
-        nargs="+",
-        choices=list(ASSET_TYPES.keys()),
-        default=list(ASSET_TYPES.keys()),
-        help="Qué exportar",
+        "--targets",
+        default=None,
+        help='Nombres de targets a exportar (separados por coma). Si se omite, exporta todos.',
     )
     p.add_argument(
         "--only",
@@ -184,32 +255,34 @@ def parse_args():
 
 
 def main():
-    # CLI/help NO toca red: solo parsea args y sale si corresponde
     args = parse_args()
+
+    plan = load_export_plan(args.config)
 
     # Cargar .env y variables
     load_dotenv()
-
     base = os.environ["TB_BASE_URL"].rstrip("/")
     token = os.environ["TB_TOKEN"].strip()
     headers = {"X-Authorization": f"Bearer {token}"}
 
-    # Zona horaria local para definir los rangos (Chile por defecto)
-    tz_name = os.environ.get("TB_TIMEZONE", "America/Santiago")
+    # TZ para definir rangos mensuales (desde YAML)
+    tz_name = plan.timezone
     tz_local = ZoneInfo(tz_name)
     print(f"Using timezone: {tz_name}")
 
+    # filtros
     only_set = parse_only_list(args.only)
+    target_set = parse_targets_list(args.targets)
 
     # customerId 1 vez
     customer_id = get_customer_id(base, headers)
 
-    for group in args.groups:
-        a_type = ASSET_TYPES[group]
-        keys = KEYS[group]
+    for target in plan.targets:
+        if target_set and target.name not in target_set:
+            continue
 
-        assets = list_assets(base, headers, customer_id, a_type)
-        print(f"{group}: {len(assets)} assets")
+        assets = list_assets(base, headers, customer_id, target.asset_type)
+        print(f"{target.name}: {len(assets)} assets (type='{target.asset_type}')")
 
         for asset in assets:
             if not asset_matches(asset, only_set):
@@ -218,17 +291,11 @@ def main():
             asset_id = asset["id"]["id"]
             label = asset.get("label") or asset.get("name") or asset_id
             safe_label = sanitize(label)
-            '''
-            for y, m, start_dt, end_dt in month_ranges(args.start_ym, args.end_ym, tz_local):
-                payload = fetch_timeseries(base, headers, asset_id, keys, ms(start_dt), ms(end_dt))
-                out = os.path.join(args.outdir, group, safe_label, f"{safe_label}_{y:04d}-{m:02d}.csv")
-                write_csv(out, asset, y, m, payload)
-                print("OK", out)
-            '''
+
             for y, m, start_dt, end_dt in month_ranges(args.start_ym, args.end_ym, tz_local):
                 out = os.path.join(
-                    args.outdir,
-                    group,
+                    plan.output_dir,
+                    target.name,
                     safe_label,
                     f"{safe_label}_{y:04d}-{m:02d}.csv",
                 )
@@ -237,14 +304,7 @@ def main():
                     print("SKIP", out)
                     continue
 
-                payload = fetch_timeseries(
-                    base,
-                    headers,
-                    asset_id,
-                    keys,
-                    ms(start_dt),
-                    ms(end_dt),
-                )
+                payload = fetch_timeseries(base, headers, asset_id, target.keys, ms(start_dt), ms(end_dt))
                 write_csv(out, asset, y, m, payload)
                 print("OK", out)
 

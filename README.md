@@ -126,3 +126,17 @@ reports/fase4_dashboard_<timestamp>.xlsx
   - Asegura que `TB_TIMEZONE` y `config/export_plan.yaml: timezone` sean correctos.
 - **Scripts de `tools/dev` fallan por `config/headers.json`**
   - Son utilidades internas y esperan un archivo local con headers de autenticación.
+  
+## Documentación
+
+La documentación del pipeline (MkDocs) está en la carpeta `docs/`.
+
+- Ver documentación en GitHub: `docs/`
+- Quickstart: `docs/quickstart.md`
+- Pipeline: `docs/pipeline.md`
+
+### Ver en local
+
+```bash
+python -m pip install -r docs/requirements.txt
+python -m mkdocs serve -f mkdocs.yml

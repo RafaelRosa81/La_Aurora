@@ -31,8 +31,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--start-date", help="Fecha de inicio (YYYY-MM-DD)")
     parser.add_argument("--end-date", help="Fecha de fin (YYYY-MM-DD)")
     parser.add_argument("--freq-minutes", type=int, default=1, help="Frecuencia esperada")
-    parser.add_argument("--pct-min", type=float, default=0.0, help="Min % permitido")
-    parser.add_argument("--pct-max", type=float, default=100.0, help="Max % permitido")
+    #parser.add_argument("--pct-min", type=float, default=0.0, help="Min % permitido")
+    #parser.add_argument("--pct-max", type=float, default=100.0, help="Max % permitido")
+    parser.add_argument("--pct-min", type=float, default=0.0, help="Min pct permitido")
+    parser.add_argument("--pct-max", type=float, default=100.0, help="Max pct permitido")
     parser.add_argument("--max-rows", type=int, default=500, help="Max filas OutOfRange")
     parser.add_argument(
         "--sample-size",

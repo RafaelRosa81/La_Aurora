@@ -5,3 +5,4 @@ openpyxl
 python-dateutil
 python-dotenv
 pyyaml
+requests

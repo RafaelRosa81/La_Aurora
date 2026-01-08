@@ -28,7 +28,10 @@ VALUE_CANDIDATES = [
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Aplica plan de limpieza para PRESION preservando subcarpetas.")
+    #p = argparse.ArgumentParser(description="Aplica plan de limpieza para PRESION preservando subcarpetas.")
+    p = argparse.ArgumentParser(
+        description="Aplica plan de limpieza para MACRO_CAUDALIMETRO preservando subcarpetas."
+    )
     p.add_argument("--plan", required=True, help="CSV plan (find_outliers_presion)")
     p.add_argument("--input-dir", required=True, help="Carpeta base entrada con CSVs")
     p.add_argument("--output-dir", required=True, help="Carpeta base salida")

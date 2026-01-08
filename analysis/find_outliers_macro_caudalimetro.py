@@ -36,7 +36,8 @@ ASSET_LABEL_CANDIDATES = ["asset_label", "asset", "equipo", "tag", "nombre", "id
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Audita outliers para target PRESION.")
+    #p = argparse.ArgumentParser(description="Audita outliers para target PRESION.")
+    p = argparse.ArgumentParser(description="Audita outliers para target MACRO_CAUDALIMETRO.")
     p.add_argument("--input-dir", required=True, help="Carpeta base con CSVs")
     p.add_argument("--group", required=True, help="Etiqueta del grupo (ej: presion)")
     p.add_argument("--asset", help="Filtra por asset (contains, case-insensitive)")

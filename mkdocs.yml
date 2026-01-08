@@ -1,0 +1,26 @@
+site_name: La Aurora Telemetry
+site_url: https://example.invalid/
+repo_url: https://example.invalid/
+nav:
+  - Overview: index.md
+  - Structure: structure.md
+  - Pipeline: pipeline.md
+  - Quickstart: quickstart.md
+  - Troubleshooting: troubleshooting.md
+  - Cookbook: cookbook.md
+  - Audit: audit.md
+
+theme:
+  name: material
+  language: es
+
+markdown_extensions:
+  - admonition
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.details
+  - pymdownx.highlight
+  - pymdownx.inlinehilite

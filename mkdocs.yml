@@ -2,13 +2,13 @@ site_name: La Aurora Telemetry
 site_url: https://example.invalid/
 repo_url: https://example.invalid/
 nav:
-  - Overview: docs/index.md
-  - Structure: docs/structure.md
-  - Pipeline: docs/pipeline.md
-  - Quickstart: docs/quickstart.md
-  - Troubleshooting: docs/troubleshooting.md
-  - Cookbook: docs/cookbook.md
-  - Audit: docs/audit.md
+  - Overview: index.md
+  - Structure: structure.md
+  - Pipeline: pipeline.md
+  - Quickstart: quickstart.md
+  - Troubleshooting: troubleshooting.md
+  - Cookbook: cookbook.md
+  - Audit: audit.md
 
 theme:
   name: material
